@@ -1,7 +1,9 @@
 from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, cast, Date
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, date
+from typing import Tuple
+from zoneinfo import ZoneInfo
 from database import get_db
 from models.booking import Booking, BookingItem, BookingStatus
 from models.staff import Staff
@@ -10,19 +12,37 @@ from auth import require_admin
 
 router = APIRouter(prefix="/reports", tags=["reports"])
 
+_APP_TZ = ZoneInfo("Asia/Taipei")
+_UTC = ZoneInfo("UTC")
+
+
+def _today_app() -> date:
+    return datetime.now(_APP_TZ).date()
+
+
+def _local_day_bounds_utc_naive(d: date) -> Tuple[datetime, datetime]:
+    """該日在 Asia/Taipei 的 00:00:00 與 23:59:59.999999，轉成 UTC naive（與 DB 存儲一致）。"""
+    start_local = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=_APP_TZ)
+    end_local = datetime(d.year, d.month, d.day, 23, 59, 59, 999999, tzinfo=_APP_TZ)
+    start_utc = start_local.astimezone(_UTC).replace(tzinfo=None)
+    end_utc = end_local.astimezone(_UTC).replace(tzinfo=None)
+    return start_utc, end_utc
+
 
 def _date_range(period: str):
-    today = datetime.utcnow().date()
+    today = _today_app()
     if period == "week":
-        start = today - timedelta(days=6)
+        start_date = today - timedelta(days=6)
     elif period == "month":
-        start = today.replace(day=1)
+        start_date = today.replace(day=1)
     elif period == "quarter":
         month = ((today.month - 1) // 3) * 3 + 1
-        start = today.replace(month=month, day=1)
+        start_date = today.replace(month=month, day=1)
     else:
-        start = today - timedelta(days=6)
-    return datetime(start.year, start.month, start.day), datetime(today.year, today.month, today.day, 23, 59, 59)
+        start_date = today - timedelta(days=6)
+    range_start, _ = _local_day_bounds_utc_naive(start_date)
+    _, range_end = _local_day_bounds_utc_naive(today)
+    return range_start, range_end
 
 
 @router.get("/summary")

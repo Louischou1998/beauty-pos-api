@@ -6,7 +6,7 @@ from typing import List, Optional
 from datetime import datetime, timedelta
 from database import get_db, settings
 from models.booking import Booking, BookingItem, BookingStatus
-from models.service import Service
+from models.service import Service, ServiceCategory
 from models.staff import Staff
 from models.staff_schedule import StaffSchedule
 from models.customer import Customer
@@ -78,8 +78,25 @@ class PortalBookingResponse(BaseModel):
 
 
 @router.get("/services")
-def list_services(db: Session = Depends(get_db)):
-    return db.query(Service).filter(Service.is_active == 1).all()
+def list_portal_services(db: Session = Depends(get_db)):
+    rows = (
+        db.query(Service, ServiceCategory.name)
+        .outerjoin(ServiceCategory, Service.category_id == ServiceCategory.id)
+        .filter(Service.is_active == 1)
+        .order_by(Service.id)
+        .all()
+    )
+    return [
+        {
+            "id": svc.id,
+            "name": svc.name,
+            "category_id": svc.category_id,
+            "category": cat_name or "未分類",
+            "duration": svc.duration,
+            "price": svc.price,
+        }
+        for svc, cat_name in rows
+    ]
 
 
 @router.get("/staff")
