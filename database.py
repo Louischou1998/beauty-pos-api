@@ -19,7 +19,7 @@ database_url = settings.database_url
 if database_url.startswith("postgresql://") and importlib.util.find_spec("psycopg2") is None:
     database_url = database_url.replace("postgresql://", "postgresql+psycopg://", 1)
 
-engine = create_engine(database_url)
+engine = create_engine(database_url, pool_pre_ping=True, pool_recycle=280)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 
