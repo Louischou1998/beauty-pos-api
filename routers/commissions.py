@@ -2,15 +2,32 @@ from fastapi import APIRouter, Depends, Query
 from sqlalchemy.orm import Session
 from sqlalchemy import func, case
 from pydantic import BaseModel
-from typing import List, Optional
+from typing import List, Optional, Tuple
 from decimal import Decimal
 from datetime import datetime, date
+from zoneinfo import ZoneInfo
 from database import get_db
 from models.commission import Commission
 from models.staff import Staff
 from auth import require_admin
 
 router = APIRouter(prefix="/commissions", tags=["commissions"])
+
+_APP_TZ = ZoneInfo("Asia/Taipei")
+_UTC = ZoneInfo("UTC")
+
+
+def _month_bounds_utc_naive(y: int, m: int) -> Tuple[datetime, datetime]:
+    """該曆月（Asia/Taipei）對應的 Commission.created_at（UTC naive）區間 [start, end)。"""
+    start_local = datetime(y, m, 1, 0, 0, 0, tzinfo=_APP_TZ)
+    if m == 12:
+        end_local = datetime(y + 1, 1, 1, 0, 0, 0, tzinfo=_APP_TZ)
+    else:
+        end_local = datetime(y, m + 1, 1, 0, 0, 0, tzinfo=_APP_TZ)
+    return (
+        start_local.astimezone(_UTC).replace(tzinfo=None),
+        end_local.astimezone(_UTC).replace(tzinfo=None),
+    )
 
 
 class CommissionOut(BaseModel):
@@ -34,17 +51,14 @@ def list_commissions(staff_id: Optional[int] = None, month: Optional[str] = None
         q = q.filter(Commission.staff_id == staff_id)
     if month:
         y, m = map(int, month.split("-"))
-        from datetime import timedelta
-        start = datetime(y, m, 1)
-        end = datetime(y, m + 1, 1) if m < 12 else datetime(y + 1, 1, 1)
+        start, end = _month_bounds_utc_naive(y, m)
         q = q.filter(Commission.created_at >= start, Commission.created_at < end)
     return q.order_by(Commission.created_at.desc()).all()
 
 
 def _payroll_impl(month: str, db: Session):
     y, m = map(int, month.split("-"))
-    start = datetime(y, m, 1)
-    end = datetime(y, m + 1, 1) if m < 12 else datetime(y + 1, 1, 1)
+    start, end = _month_bounds_utc_naive(y, m)
 
     rows = (
         db.query(

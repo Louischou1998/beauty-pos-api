@@ -1,7 +1,8 @@
 from fastapi import APIRouter, Depends
 from sqlalchemy.orm import Session
 from sqlalchemy import and_
-from datetime import timedelta
+from datetime import datetime, date as DateType, timedelta, timezone as dt_timezone
+from zoneinfo import ZoneInfo
 from database import get_db, settings
 from models.booking import Booking, BookingItem, BookingStatus
 from models.service import Service
@@ -19,6 +20,25 @@ router = APIRouter(prefix="/bookings", tags=["bookings"])
 _redis = redis_client.from_url(settings.redis_url, decode_responses=True)
 BUSINESS_OPEN_MINUTES = 9 * 60
 BUSINESS_CLOSE_MINUTES = 22 * 60
+
+_APP_TZ = ZoneInfo("Asia/Taipei")
+_UTC = ZoneInfo("UTC")
+
+
+def _utc_range_for_local_calendar_day(d: DateType):
+    start_local = datetime(d.year, d.month, d.day, 0, 0, 0, tzinfo=_APP_TZ)
+    end_local = start_local + timedelta(days=1)
+    return (
+        start_local.astimezone(_UTC).replace(tzinfo=None),
+        end_local.astimezone(_UTC).replace(tzinfo=None),
+    )
+
+
+def _to_taipei(dt: datetime) -> datetime:
+    """後台行事曆傳 ISO(Z)；DB 內可能為 UTC naive。"""
+    if dt.tzinfo is None:
+        return dt.replace(tzinfo=dt_timezone.utc).astimezone(_APP_TZ)
+    return dt.astimezone(_APP_TZ)
 
 
 def _check_conflict(db: Session, staff_id: int, start_at, end_at, exclude_item_id=None):
@@ -53,9 +73,11 @@ def _add_booking_item_with_conflict_check(db: Session, booking_id: int, item, en
 
 
 def _validate_booking_time(item, end_at):
-    start_minutes = item.start_at.hour * 60 + item.start_at.minute
-    end_minutes = end_at.hour * 60 + end_at.minute
-    if item.start_at.minute not in (0, 30) or item.start_at.second != 0:
+    local_start = _to_taipei(item.start_at)
+    local_end = _to_taipei(end_at)
+    start_minutes = local_start.hour * 60 + local_start.minute
+    end_minutes = local_end.hour * 60 + local_end.minute
+    if local_start.minute not in (0, 30) or local_start.second != 0:
         raise api_error(
             400,
             "INVALID_TIME_SLOT",
@@ -72,18 +94,21 @@ def _validate_booking_time(item, end_at):
 
 
 def _is_staff_on_shift(db: Session, staff_id: int, start_at, end_at):
+    local_start = _to_taipei(start_at)
+    local_end = _to_taipei(end_at)
+    work_date = local_start.date()
     row = (
         db.query(StaffSchedule)
         .filter(
             StaffSchedule.staff_id == staff_id,
-            StaffSchedule.work_date == start_at.date(),
+            StaffSchedule.work_date == work_date,
         )
         .first()
     )
     if not row:
         return True
-    start_minutes = start_at.hour * 60 + start_at.minute
-    end_minutes = end_at.hour * 60 + end_at.minute
+    start_minutes = local_start.hour * 60 + local_start.minute
+    end_minutes = local_end.hour * 60 + local_end.minute
     if row.shift_type == "off":
         return False
     if row.shift_type == "full":
@@ -99,9 +124,8 @@ def _is_staff_on_shift(db: Session, staff_id: int, start_at, end_at):
 def list_bookings(date: str = None, db: Session = Depends(get_db), _=Depends(require_auth)):
     q = db.query(Booking)
     if date:
-        from datetime import datetime
-        start = datetime.fromisoformat(date)
-        end = start + timedelta(days=1)
+        d = DateType.fromisoformat(date)
+        start, end = _utc_range_for_local_calendar_day(d)
         q = q.join(BookingItem).filter(
             BookingItem.start_at >= start,
             BookingItem.start_at < end,

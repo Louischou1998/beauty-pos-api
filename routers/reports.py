@@ -45,6 +45,13 @@ def _date_range(period: str):
     return range_start, range_end
 
 
+def _booking_item_taipei_date(db: Session):
+    """BookingItem.start_at 以 UTC naive 儲存時，依 Asia/Taipei 切日（PostgreSQL 精確；SQLite 用 +8h）。"""
+    if db.get_bind().dialect.name == "postgresql":
+        return cast(func.timezone("Asia/Taipei", func.timezone("UTC", BookingItem.start_at)), Date)
+    return cast(func.date(BookingItem.start_at, "+8 hours"), Date)
+
+
 @router.get("/summary")
 def summary(period: str = Query("week"), db: Session = Depends(get_db), _=Depends(require_admin)):
     start, end = _date_range(period)
@@ -71,10 +78,11 @@ def summary(period: str = Query("week"), db: Session = Depends(get_db), _=Depend
 @router.get("/daily")
 def daily(period: str = Query("week"), db: Session = Depends(get_db), _=Depends(require_admin)):
     start, end = _date_range(period)
+    day_col = _booking_item_taipei_date(db)
 
     rows = (
         db.query(
-            cast(BookingItem.start_at, Date).label("date"),
+            day_col.label("date"),
             func.sum(BookingItem.price).label("revenue"),
             func.count(func.distinct(Booking.id)).label("bookings"),
         )
@@ -83,8 +91,8 @@ def daily(period: str = Query("week"), db: Session = Depends(get_db), _=Depends(
             Booking.status != BookingStatus.cancelled,
             BookingItem.start_at.between(start, end),
         )
-        .group_by(cast(BookingItem.start_at, Date))
-        .order_by(cast(BookingItem.start_at, Date))
+        .group_by(day_col)
+        .order_by(day_col)
         .all()
     )
 
@@ -97,10 +105,11 @@ def daily(period: str = Query("week"), db: Session = Depends(get_db), _=Depends(
 @router.get("/daily-staff")
 def daily_staff_breakdown(period: str = Query("week"), db: Session = Depends(get_db), _=Depends(require_admin)):
     start, end = _date_range(period)
+    day_col = _booking_item_taipei_date(db)
 
     rows = (
         db.query(
-            cast(BookingItem.start_at, Date).label("date"),
+            day_col.label("date"),
             Staff.id.label("staff_id"),
             Staff.name.label("staff_name"),
             Staff.color.label("staff_color"),
@@ -112,8 +121,8 @@ def daily_staff_breakdown(period: str = Query("week"), db: Session = Depends(get
             Booking.status != BookingStatus.cancelled,
             BookingItem.start_at.between(start, end),
         )
-        .group_by(cast(BookingItem.start_at, Date), Staff.id, Staff.name, Staff.color)
-        .order_by(cast(BookingItem.start_at, Date), func.coalesce(func.sum(BookingItem.price), 0).desc())
+        .group_by(day_col, Staff.id, Staff.name, Staff.color)
+        .order_by(day_col, func.coalesce(func.sum(BookingItem.price), 0).desc())
         .all()
     )
 
