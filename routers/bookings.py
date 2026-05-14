@@ -42,7 +42,7 @@ def _to_taipei(dt: datetime) -> datetime:
     return dt.astimezone(_APP_TZ)
 
 
-def _check_conflict(db: Session, staff_id: int, start_at, end_at, exclude_item_id=None):
+def _check_conflict(db: Session, staff_id: int, start_at, end_at, exclude_item_id=None, exclude_booking_id=None):
     q = db.query(BookingItem).filter(
         BookingItem.staff_id == staff_id,
         BookingItem.start_at < end_at,
@@ -50,11 +50,13 @@ def _check_conflict(db: Session, staff_id: int, start_at, end_at, exclude_item_i
     )
     if exclude_item_id:
         q = q.filter(BookingItem.id != exclude_item_id)
+    if exclude_booking_id:
+        q = q.filter(BookingItem.booking_id != exclude_booking_id)
     return q.first()
 
 
 def _add_booking_item_with_conflict_check(db: Session, booking_id: int, item, end_at):
-    if _check_conflict(db, item.staff_id, item.start_at, end_at):
+    if _check_conflict(db, item.staff_id, item.start_at, end_at, exclude_booking_id=booking_id):
         raise api_error(
             409,
             "BOOKING_CONFLICT",
@@ -75,9 +77,7 @@ def _add_booking_item_with_conflict_check(db: Session, booking_id: int, item, en
 
 def _validate_booking_time(item, end_at):
     local_start = _to_taipei(item.start_at)
-    local_end = _to_taipei(end_at)
     start_minutes = local_start.hour * 60 + local_start.minute
-    end_minutes = local_end.hour * 60 + local_end.minute
     if local_start.minute not in (0, 30) or local_start.second != 0:
         raise api_error(
             400,
@@ -85,12 +85,12 @@ def _validate_booking_time(item, end_at):
             "Booking start time must be on half-hour slots",
             {"start_at": item.start_at.isoformat()},
         )
-    if not (BUSINESS_OPEN_MINUTES <= start_minutes < end_minutes <= BUSINESS_CLOSE_MINUTES):
+    if not (BUSINESS_OPEN_MINUTES <= start_minutes < BUSINESS_CLOSE_MINUTES):
         raise api_error(
             400,
             "INVALID_TIME_SLOT",
-            "Booking must be within business hours",
-            {"start_at": item.start_at.isoformat(), "end_at": end_at.isoformat()},
+            "Booking start time must be within business hours",
+            {"start_at": item.start_at.isoformat()},
         )
 
 
