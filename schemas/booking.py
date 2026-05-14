@@ -1,6 +1,6 @@
-from pydantic import BaseModel
+from pydantic import BaseModel, field_validator
 from typing import List, Optional
-from datetime import datetime
+from datetime import datetime, timezone
 from decimal import Decimal
 from models.booking import BookingStatus
 
@@ -25,6 +25,14 @@ class BookingItemOut(BaseModel):
     start_at: datetime
     end_at: datetime
     price: Decimal
+
+    # DB 存 UTC naive，加上時區後綴讓前端 dayjs 正確解析
+    @field_validator('start_at', 'end_at', mode='before')
+    @classmethod
+    def ensure_utc(cls, v):
+        if isinstance(v, datetime) and v.tzinfo is None:
+            return v.replace(tzinfo=timezone.utc)
+        return v
 
     model_config = {"from_attributes": True}
 
