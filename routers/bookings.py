@@ -42,7 +42,7 @@ def _to_taipei(dt: datetime) -> datetime:
     return dt.astimezone(_APP_TZ)
 
 
-def _check_conflict(db: Session, staff_id: int, start_at, end_at, exclude_item_id=None, exclude_booking_id=None):
+def _check_conflict(db: Session, staff_id: int, start_at, end_at, exclude_item_id=None):
     q = db.query(BookingItem).filter(
         BookingItem.staff_id == staff_id,
         BookingItem.start_at < end_at,
@@ -50,13 +50,15 @@ def _check_conflict(db: Session, staff_id: int, start_at, end_at, exclude_item_i
     )
     if exclude_item_id:
         q = q.filter(BookingItem.id != exclude_item_id)
-    if exclude_booking_id:
-        q = q.filter(BookingItem.booking_id != exclude_booking_id)
     return q.first()
 
 
 def _add_booking_item_with_conflict_check(db: Session, booking_id: int, item, end_at):
-    if _check_conflict(db, item.staff_id, item.start_at, end_at, exclude_booking_id=booking_id):
+    # no_autoflush：不把本次還沒 commit 的 items flush 進去，
+    # 這樣同一張預約的多個 items 就不會互相衝突
+    with db.no_autoflush:
+        conflict = _check_conflict(db, item.staff_id, item.start_at, end_at)
+    if conflict:
         raise api_error(
             409,
             "BOOKING_CONFLICT",
