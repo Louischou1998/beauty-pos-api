@@ -1,4 +1,4 @@
-from sqlalchemy import Column, Integer, String, Numeric, Text, DateTime, ForeignKey
+from sqlalchemy import Column, Integer, String, Numeric, Text, DateTime, ForeignKey, Date
 from database import Base
 
 
@@ -19,3 +19,4 @@ class Customer(Base):
     preferred_staff_id = Column(Integer, ForeignKey("staff.id"), nullable=True)
     revisit_days = Column(Integer, default=30)
     last_visit_at = Column(DateTime, nullable=True)
+    birthday = Column(Date, nullable=True)

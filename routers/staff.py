@@ -97,27 +97,31 @@ def upsert_schedules(
     if not staff:
         raise HTTPException(404, "Staff not found")
 
+    if not payload:
+        return []
+
     for entry in payload:
         if entry.shift_type not in SHIFT_TYPES:
             raise HTTPException(400, "Invalid shift_type")
 
-        row = (
-            db.query(StaffSchedule)
-            .filter(
-                StaffSchedule.staff_id == staff_id,
-                StaffSchedule.work_date == entry.work_date,
-            )
-            .first()
-        )
+    dates = [p.work_date for p in payload]
+
+    # 批次查出現有班表，避免 N+1
+    existing = {
+        row.work_date: row
+        for row in db.query(StaffSchedule).filter(
+            StaffSchedule.staff_id == staff_id,
+            StaffSchedule.work_date.in_(dates),
+        ).all()
+    }
+    for entry in payload:
+        row = existing.get(entry.work_date)
         if row:
             row.shift_type = entry.shift_type
         else:
             db.add(StaffSchedule(staff_id=staff_id, work_date=entry.work_date, shift_type=entry.shift_type))
 
     db.commit()
-    dates = [p.work_date for p in payload]
-    if not dates:
-        return []
     return (
         db.query(StaffSchedule)
         .filter(

@@ -1,6 +1,7 @@
 from pydantic import BaseModel
 from typing import Optional
 from decimal import Decimal
+from datetime import date, datetime
 
 
 class CustomerBase(BaseModel):
@@ -11,7 +12,10 @@ class CustomerBase(BaseModel):
 
 
 class CustomerCreate(CustomerBase):
-    pass
+    allergy_info: Optional[str] = ""
+    preferred_staff_id: Optional[int] = None
+    revisit_days: Optional[int] = 30
+    birthday: Optional[date] = None
 
 
 class CustomerUpdate(BaseModel):
@@ -19,6 +23,10 @@ class CustomerUpdate(BaseModel):
     phone: Optional[str] = None
     email: Optional[str] = None
     level: Optional[str] = None
+    allergy_info: Optional[str] = None
+    preferred_staff_id: Optional[int] = None
+    revisit_days: Optional[int] = None
+    birthday: Optional[date] = None
 
 
 class CustomerTopUp(BaseModel):
@@ -32,5 +40,10 @@ class CustomerOut(CustomerBase):
     balance: Decimal
     total_spent: Decimal
     visits: int
+    allergy_info: Optional[str] = ""
+    preferred_staff_id: Optional[int] = None
+    revisit_days: Optional[int] = 30
+    last_visit_at: Optional[datetime] = None
+    birthday: Optional[date] = None
 
     model_config = {"from_attributes": True}

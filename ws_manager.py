@@ -11,7 +11,10 @@ class ConnectionManager:
         self._connections.append(ws)
 
     def disconnect(self, ws: WebSocket):
-        self._connections.remove(ws)
+        try:
+            self._connections.remove(ws)
+        except ValueError:
+            pass
 
     async def broadcast(self, event: str, data: dict):
         dead = []

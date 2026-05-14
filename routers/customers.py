@@ -1,4 +1,4 @@
-from datetime import datetime
+from datetime import datetime, date
 from decimal import Decimal
 from fastapi import APIRouter, Depends, HTTPException
 from sqlalchemy.orm import Session
@@ -9,7 +9,7 @@ from models.booking import Booking, BookingItem, BookingStatus
 from models.service import Service
 from models.staff import Staff
 from schemas.customer import CustomerCreate, CustomerUpdate, CustomerOut, CustomerTopUp
-from typing import List
+from typing import List, Optional
 from auth import require_auth, require_admin
 from pydantic import BaseModel
 
@@ -23,6 +23,12 @@ class CustomerHistoryOut(BaseModel):
     staff_name: str
     amount: float
     status: str
+
+
+class UpcomingBirthdayOut(BaseModel):
+    customer: CustomerOut
+    days_until: int
+    birthday_date: date
 
 
 def _level_by_spent(total_spent: Decimal) -> str:
@@ -65,6 +71,11 @@ def _to_customer_out(customer: Customer, metric_row=None):
         balance=customer.balance,
         total_spent=spent,
         visits=int(metric_row.visits) if metric_row else 0,
+        allergy_info=customer.allergy_info or "",
+        preferred_staff_id=customer.preferred_staff_id,
+        revisit_days=customer.revisit_days,
+        last_visit_at=customer.last_visit_at,
+        birthday=customer.birthday,
     )
 
 
@@ -82,6 +93,35 @@ def create_customer(payload: CustomerCreate, db: Session = Depends(get_db), _=De
     db.commit()
     db.refresh(customer)
     return customer
+
+
+# Must be defined before /{customer_id} to avoid path conflict
+@router.get("/birthdays", response_model=List[UpcomingBirthdayOut])
+def upcoming_birthdays(days: int = 30, db: Session = Depends(get_db), _=Depends(require_auth)):
+    today = date.today()
+    customers_with_bd = db.query(Customer).filter(Customer.birthday.isnot(None)).all()
+    metrics = _customer_metrics(db, [c.id for c in customers_with_bd])
+    result = []
+    for c in customers_with_bd:
+        bd = c.birthday
+        try:
+            this_year_bd = bd.replace(year=today.year)
+        except ValueError:
+            this_year_bd = bd.replace(year=today.year, day=28)
+        delta = (this_year_bd - today).days
+        if delta < 0:
+            try:
+                this_year_bd = bd.replace(year=today.year + 1)
+            except ValueError:
+                this_year_bd = bd.replace(year=today.year + 1, day=28)
+            delta = (this_year_bd - today).days
+        if 0 <= delta <= days:
+            result.append(UpcomingBirthdayOut(
+                customer=_to_customer_out(c, metrics.get(c.id)),
+                days_until=delta,
+                birthday_date=this_year_bd,
+            ))
+    return sorted(result, key=lambda x: x.days_until)
 
 
 @router.get("/{customer_id}", response_model=CustomerOut)
@@ -102,7 +142,8 @@ def update_customer(customer_id: int, payload: CustomerUpdate, db: Session = Dep
         setattr(customer, k, v)
     db.commit()
     db.refresh(customer)
-    return customer
+    metrics = _customer_metrics(db, [customer_id])
+    return _to_customer_out(customer, metrics.get(customer_id))
 
 
 @router.post("/{customer_id}/topup", response_model=CustomerOut)

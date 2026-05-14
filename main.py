@@ -5,7 +5,8 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from database import engine, Base
 from routers import (staff, customers, bookings, services, checkout, reports,
-                     auth, inventory, portal, products, coupons, payments, commissions)
+                     auth, inventory, portal, products, coupons, payments, commissions,
+                     hair_records)
 from ws_manager import manager
 
 Base.metadata.create_all(bind=engine)
@@ -32,7 +33,8 @@ app.add_middleware(
 )
 
 for router in [auth, staff, customers, bookings, services, checkout,
-               reports, inventory, portal, products, coupons, payments, commissions]:
+               reports, inventory, portal, products, coupons, payments, commissions,
+               hair_records]:
     app.include_router(router.router, prefix="/api/v1")
 
 

@@ -3,7 +3,7 @@ from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import Optional, List
 from decimal import Decimal
-from datetime import datetime
+from datetime import datetime, timedelta
 from database import get_db
 from models.booking import Booking, BookingItem, BookingStatus
 from models.customer import Customer
@@ -58,19 +58,32 @@ async def checkout(payload: CheckoutRequest, db: Session = Depends(get_db), user
 
     subtotal = sum(i.price for i in payload.items)
 
-    # 驗證優惠券
+    # 驗證優惠券（與 /coupons/validate 保持相同邏輯）
     coupon_discount = Decimal("0")
     coupon_obj = None
     if payload.coupon_code:
         coupon_obj = db.query(Coupon).filter(
             Coupon.code == payload.coupon_code.upper(),
-            Coupon.is_active == 1
+            Coupon.is_active == 1,
         ).first()
-        if coupon_obj:
-            if coupon_obj.type == "percent":
-                coupon_discount = (subtotal * coupon_obj.value).quantize(Decimal("1"))
-            else:
-                coupon_discount = coupon_obj.value
+        if not coupon_obj:
+            raise api_error(400, "COUPON_INVALID", "優惠券不存在或已停用")
+        now_utc = datetime.utcnow()
+        if coupon_obj.valid_from and coupon_obj.valid_from > now_utc:
+            raise api_error(400, "COUPON_INVALID", "優惠券尚未生效")
+        if coupon_obj.valid_until and coupon_obj.valid_until < now_utc:
+            raise api_error(400, "COUPON_EXPIRED", "優惠券已過期")
+        if coupon_obj.max_uses > 0 and coupon_obj.used_count >= coupon_obj.max_uses:
+            raise api_error(400, "COUPON_EXHAUSTED", "優惠券使用次數已達上限")
+        if subtotal < coupon_obj.min_amount:
+            raise api_error(
+                400, "COUPON_MIN_AMOUNT", "消費未達優惠券最低金額",
+                {"min_amount": float(coupon_obj.min_amount)},
+            )
+        if coupon_obj.type == "percent":
+            coupon_discount = (subtotal * coupon_obj.value).quantize(Decimal("1"))
+        else:
+            coupon_discount = coupon_obj.value
 
     total = subtotal - coupon_discount
 
@@ -83,6 +96,15 @@ async def checkout(payload: CheckoutRequest, db: Session = Depends(get_db), user
             "Payment total does not match order total",
             {"payment_total": float(payment_total), "order_total": float(total)},
         )
+
+    # 批次預取所有需要的資料，避免 N+1
+    service_ids = {i.item_id for i in payload.items if i.type == "service"}
+    product_ids = {i.item_id for i in payload.items if i.type == "product"}
+    staff_ids = {i.staff_id for i in payload.items}
+
+    services_map = {s.id: s for s in db.query(Service).filter(Service.id.in_(service_ids)).all()} if service_ids else {}
+    products_map = {p.id: p for p in db.query(Product).filter(Product.id.in_(product_ids)).all()} if product_ids else {}
+    staffs_map = {s.id: s for s in db.query(Staff).filter(Staff.id.in_(staff_ids)).all()} if staff_ids else {}
 
     points_earned = 0
     with db.begin_nested():
@@ -101,12 +123,11 @@ async def checkout(payload: CheckoutRequest, db: Session = Depends(get_db), user
         db.flush()
 
         now = datetime.utcnow()
-        from datetime import timedelta
 
         # BookingItems + Commissions
         for item in payload.items:
             if item.type == "service":
-                service = db.get(Service, item.item_id)
+                service = services_map.get(item.item_id)
                 if not service:
                     raise api_error(404, "SERVICE_NOT_FOUND", "Service not found", {"service_id": item.item_id})
                 end_at = now + timedelta(minutes=int(service.duration))
@@ -116,7 +137,7 @@ async def checkout(payload: CheckoutRequest, db: Session = Depends(get_db), user
                 ))
                 item_name = service.name
             else:
-                product = db.get(Product, item.item_id)
+                product = products_map.get(item.item_id)
                 if not product:
                     raise api_error(404, "PRODUCT_NOT_FOUND", "Product not found", {"product_id": item.item_id})
                 if product.stock < 1:
@@ -130,7 +151,7 @@ async def checkout(payload: CheckoutRequest, db: Session = Depends(get_db), user
                 item_name = product.name
 
             # 抽成記錄
-            staff = db.get(Staff, item.staff_id)
+            staff = staffs_map.get(item.staff_id)
             if staff:
                 rate = Decimal(str(staff.commission_rate))
                 # 指定技師加成 5%
@@ -165,9 +186,16 @@ async def checkout(payload: CheckoutRequest, db: Session = Depends(get_db), user
                 customer.last_visit_at = now
                 points_earned = int(total // 10)
                 customer.points += points_earned
-                # 扣除儲值金
+                # 扣除儲值金（先確認餘額足夠）
                 store_value_paid = sum(p.amount for p in payload.payments if p.method == "store_value")
                 if store_value_paid > 0:
+                    if customer.balance < store_value_paid:
+                        raise api_error(
+                            400,
+                            "INSUFFICIENT_BALANCE",
+                            "儲值金餘額不足",
+                            {"balance": float(customer.balance), "required": float(store_value_paid)},
+                        )
                     customer.balance -= store_value_paid
                 if customer.total_spent >= 50000:
                     customer.level = 'VIP'

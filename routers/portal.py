@@ -1,5 +1,6 @@
 """Public booking portal — no auth required."""
 from fastapi import APIRouter, Depends
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 from pydantic import BaseModel
 from typing import List, Optional
@@ -121,9 +122,16 @@ def list_portal_services(db: Session = Depends(get_db)):
     ]
 
 
-@router.get("/staff")
+class PublicStaffOut(BaseModel):
+    id: int
+    name: str
+    color: str
+    skills: list
+
+
+@router.get("/staff", response_model=List[PublicStaffOut])
 def list_staff(db: Session = Depends(get_db)):
-    return db.query(Staff).filter(Staff.is_active == 1).all()
+    return db.query(Staff).filter(Staff.is_active == 1).order_by(Staff.id).all()
 
 
 @router.get("/available-slots")
@@ -132,19 +140,16 @@ def available_slots(service_id: int, staff_id: Optional[int] = None, date: str =
     if not service:
         raise api_error(404, "SERVICE_NOT_FOUND", "Service not found", {"service_id": service_id})
 
-    if date:
-        d = date_type.fromisoformat(date)
-    else:
-        d = datetime.now(_APP_TZ).date()
+    d = date_type.fromisoformat(date) if date else datetime.now(_APP_TZ).date()
 
     day_start_local = datetime(d.year, d.month, d.day, 9, 0, 0, tzinfo=_APP_TZ)
     day_end_local = datetime(d.year, d.month, d.day, 21, 0, 0, tzinfo=_APP_TZ)
     start_utc_naive = day_start_local.astimezone(_UTC).replace(tzinfo=None)
     end_utc_naive = day_end_local.astimezone(_UTC).replace(tzinfo=None)
 
+    duration = int(service.duration)
     slots_utc = []
     current = start_utc_naive
-    duration = int(service.duration)
     while current + timedelta(minutes=duration) <= end_utc_naive:
         slots_utc.append(current)
         current += timedelta(minutes=30)
@@ -152,13 +157,58 @@ def available_slots(service_id: int, staff_id: Optional[int] = None, date: str =
     if staff_id:
         target_staff_ids = [staff_id]
     else:
-        target_staff_ids = [s.id for s in db.query(Staff).filter(Staff.is_active == 1).all()]
+        target_staff_ids = [s.id for s in db.query(Staff).filter(Staff.is_active == 1).order_by(Staff.id).all()]
+
+    if not target_staff_ids:
+        return [{"time": _utc_naive_to_taipei_iso_for_display(s), "available": False} for s in slots_utc]
+
+    # 一次查出當天所有相關預約，避免迴圈 N+1
+    fetch_end = end_utc_naive + timedelta(hours=3)
+    booked: dict[int, list] = {sid: [] for sid in target_staff_ids}
+    for item in (
+        db.query(BookingItem)
+        .join(Booking, BookingItem.booking_id == Booking.id)
+        .filter(
+            Booking.status != BookingStatus.cancelled,
+            BookingItem.staff_id.in_(target_staff_ids),
+            BookingItem.start_at < fetch_end,
+            BookingItem.end_at > start_utc_naive,
+        )
+        .all()
+    ):
+        booked[item.staff_id].append((item.start_at, item.end_at))
+
+    # 一次查出所有班表
+    schedules: dict[int, object] = {
+        row.staff_id: row
+        for row in db.query(StaffSchedule).filter(
+            StaffSchedule.staff_id.in_(target_staff_ids),
+            StaffSchedule.work_date == d,
+        ).all()
+    }
+
+    def staff_on_shift(sid: int, slot_start: datetime, slot_end: datetime) -> bool:
+        row = schedules.get(sid)
+        if not row:
+            return True
+        local_s = _utc_naive_to_taipei(slot_start)
+        local_e = _utc_naive_to_taipei(slot_end)
+        sm, em = local_s.hour * 60 + local_s.minute, local_e.hour * 60 + local_e.minute
+        if row.shift_type == "off":
+            return False
+        if row.shift_type == "morning":
+            return 9 * 60 <= sm and em <= 13 * 60
+        if row.shift_type == "afternoon":
+            return 13 * 60 <= sm and em <= 18 * 60
+        return 9 * 60 <= sm and em <= 22 * 60
 
     def is_free(slot: datetime) -> bool:
         end = slot + timedelta(minutes=duration)
-        if not target_staff_ids:
-            return False
-        return any(_is_staff_on_shift(db, sid, slot, end) and not _has_booking_conflict(db, sid, slot, end) for sid in target_staff_ids)
+        return any(
+            staff_on_shift(sid, slot, end)
+            and not any(s < end and e > slot for s, e in booked[sid])
+            for sid in target_staff_ids
+        )
 
     return [{"time": _utc_naive_to_taipei_iso_for_display(s), "available": is_free(s)} for s in slots_utc]
 
@@ -172,7 +222,7 @@ async def portal_book(payload: PortalBookingRequest, db: Session = Depends(get_d
     # 自動選技師（若未指定）
     staff_id = payload.staff_id
     if not staff_id:
-        staff = db.query(Staff).filter(Staff.is_active == 1).first()
+        staff = db.query(Staff).filter(Staff.is_active == 1).order_by(Staff.id).first()
         if staff:
             staff_id = staff.id
 
@@ -183,6 +233,12 @@ async def portal_book(payload: PortalBookingRequest, db: Session = Depends(get_d
         raise api_error(400, "STAFF_NOT_AVAILABLE", "Staff not available", {"staff_id": staff_id})
     start_at = _taipei_wall_to_utc_naive(payload.start_at)
     end_at = start_at + timedelta(minutes=int(service.duration))
+
+    # 不允許預約過去的時段（寬限 5 分鐘）
+    now_utc_naive = datetime.now(_APP_TZ).astimezone(_UTC).replace(tzinfo=None)
+    if start_at < now_utc_naive - timedelta(minutes=5):
+        raise api_error(400, "INVALID_TIME_SLOT", "Cannot book a past time slot", {"start_at": start_at.isoformat()})
+
     if not _is_staff_on_shift(db, staff_id, start_at, end_at):
         raise api_error(
             409,
@@ -191,12 +247,16 @@ async def portal_book(payload: PortalBookingRequest, db: Session = Depends(get_d
             {"staff_id": staff_id, "start_at": start_at.isoformat()},
         )
 
-    # 找或建立顧客
+    # 找或建立顧客（用 savepoint 防止並發 INSERT 同一 phone 的 race condition）
     customer = db.query(Customer).filter(Customer.phone == payload.customer_phone).first()
     if not customer:
-        customer = Customer(name=payload.customer_name, phone=payload.customer_phone)
-        db.add(customer)
-        db.flush()
+        try:
+            with db.begin_nested():
+                customer = Customer(name=payload.customer_name, phone=payload.customer_phone)
+                db.add(customer)
+                db.flush()
+        except IntegrityError:
+            customer = db.query(Customer).filter(Customer.phone == payload.customer_phone).first()
 
     lock_key = f"portal-slot:{staff_id}:{start_at.isoformat()}"
     with _redis.lock(lock_key, timeout=10):

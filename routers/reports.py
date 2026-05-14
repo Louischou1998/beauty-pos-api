@@ -151,8 +151,8 @@ def staff_performance(period: str = Query("week"), db: Session = Depends(get_db)
             func.count(BookingItem.id).label("bookings"),
             func.coalesce(func.sum(BookingItem.price), 0).label("revenue"),
         )
-        .outerjoin(BookingItem, BookingItem.staff_id == Staff.id)
-        .outerjoin(Booking, (BookingItem.booking_id == Booking.id) & (Booking.status != BookingStatus.cancelled) & BookingItem.start_at.between(start, end))
+        .outerjoin(BookingItem, (BookingItem.staff_id == Staff.id) & BookingItem.start_at.between(start, end))
+        .outerjoin(Booking, (BookingItem.booking_id == Booking.id) & (Booking.status != BookingStatus.cancelled))
         .filter(Staff.is_active == 1)
         .group_by(Staff.id, Staff.name, Staff.color, Staff.commission_rate)
         .order_by(func.coalesce(func.sum(BookingItem.price), 0).desc())

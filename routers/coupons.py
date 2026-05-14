@@ -66,6 +66,8 @@ def validate_coupon(code: str, amount: float, db: Session = Depends(get_db), _=D
         return ValidateResponse(valid=False, message="優惠券不存在或已停用")
 
     now = datetime.utcnow()
+    if c.valid_from and c.valid_from > now:
+        return ValidateResponse(valid=False, message="優惠券尚未生效")
     if c.valid_until and c.valid_until < now:
         return ValidateResponse(valid=False, message="優惠券已過期")
     if c.max_uses > 0 and c.used_count >= c.max_uses:

@@ -1,5 +1,6 @@
 from fastapi import APIRouter, Depends
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
+from sqlalchemy import exists as sa_exists
 from sqlalchemy import and_
 from datetime import datetime, date as DateType, timedelta, timezone as dt_timezone
 from zoneinfo import ZoneInfo
@@ -121,20 +122,40 @@ def _is_staff_on_shift(db: Session, staff_id: int, start_at, end_at):
 
 
 @router.get("/", response_model=List[BookingOut])
-def list_bookings(date: str = None, db: Session = Depends(get_db), _=Depends(require_auth)):
-    q = db.query(Booking)
+def list_bookings(
+    date: str = None,
+    start_date: str = None,
+    end_date: str = None,
+    db: Session = Depends(get_db),
+    _=Depends(require_auth),
+):
+    q = db.query(Booking).options(selectinload(Booking.items))
     if date:
         d = DateType.fromisoformat(date)
         start, end = _utc_range_for_local_calendar_day(d)
-        q = q.join(BookingItem).filter(
-            BookingItem.start_at >= start,
-            BookingItem.start_at < end,
-        )
+        q = q.filter(sa_exists().where(
+            (BookingItem.booking_id == Booking.id) &
+            (BookingItem.start_at >= start) &
+            (BookingItem.start_at < end),
+        ))
+    elif start_date and end_date:
+        sd = DateType.fromisoformat(start_date)
+        ed = DateType.fromisoformat(end_date)
+        start, _ = _utc_range_for_local_calendar_day(sd)
+        _, end = _utc_range_for_local_calendar_day(ed)
+        q = q.filter(sa_exists().where(
+            (BookingItem.booking_id == Booking.id) &
+            (BookingItem.start_at >= start) &
+            (BookingItem.start_at < end),
+        ))
     return q.all()
 
 
 @router.post("/", response_model=BookingOut, status_code=201)
 def create_booking(payload: BookingCreate, db: Session = Depends(get_db), user=Depends(require_auth)):
+    service_ids = {item.service_id for item in payload.items}
+    services_map = {s.id: s for s in db.query(Service).filter(Service.id.in_(service_ids)).all()}
+
     booking = None
     with db.begin_nested():
         booking = Booking(customer_id=payload.customer_id, note=payload.note)
@@ -142,7 +163,7 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db), user=D
         db.flush()
 
         for item in payload.items:
-            service = db.get(Service, item.service_id)
+            service = services_map.get(item.service_id)
             if not service:
                 raise api_error(404, "SERVICE_NOT_FOUND", "Service not found", {"service_id": item.service_id})
 
