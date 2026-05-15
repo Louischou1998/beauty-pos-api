@@ -159,58 +159,7 @@ def available_slots(service_id: int, staff_id: Optional[int] = None, date: str =
     else:
         target_staff_ids = [s.id for s in db.query(Staff).filter(Staff.is_active == 1).order_by(Staff.id).all()]
 
-    if not target_staff_ids:
-        return [{"time": _utc_naive_to_taipei_iso_for_display(s), "available": False} for s in slots_utc]
-
-    # 一次查出當天所有相關預約，避免迴圈 N+1
-    fetch_end = end_utc_naive + timedelta(hours=3)
-    booked: dict[int, list] = {sid: [] for sid in target_staff_ids}
-    for item in (
-        db.query(BookingItem)
-        .join(Booking, BookingItem.booking_id == Booking.id)
-        .filter(
-            Booking.status != BookingStatus.cancelled,
-            BookingItem.staff_id.in_(target_staff_ids),
-            BookingItem.start_at < fetch_end,
-            BookingItem.end_at > start_utc_naive,
-        )
-        .all()
-    ):
-        booked[item.staff_id].append((item.start_at, item.end_at))
-
-    # 一次查出所有班表
-    schedules: dict[int, object] = {
-        row.staff_id: row
-        for row in db.query(StaffSchedule).filter(
-            StaffSchedule.staff_id.in_(target_staff_ids),
-            StaffSchedule.work_date == d,
-        ).all()
-    }
-
-    def staff_on_shift(sid: int, slot_start: datetime, slot_end: datetime) -> bool:
-        row = schedules.get(sid)
-        if not row:
-            return True
-        local_s = _utc_naive_to_taipei(slot_start)
-        local_e = _utc_naive_to_taipei(slot_end)
-        sm, em = local_s.hour * 60 + local_s.minute, local_e.hour * 60 + local_e.minute
-        if row.shift_type == "off":
-            return False
-        if row.shift_type == "morning":
-            return 9 * 60 <= sm and em <= 13 * 60
-        if row.shift_type == "afternoon":
-            return 13 * 60 <= sm and em <= 18 * 60
-        return 9 * 60 <= sm and em <= 22 * 60
-
-    def is_free(slot: datetime) -> bool:
-        end = slot + timedelta(minutes=duration)
-        return any(
-            staff_on_shift(sid, slot, end)
-            and not any(s < end and e > slot for s, e in booked[sid])
-            for sid in target_staff_ids
-        )
-
-    return [{"time": _utc_naive_to_taipei_iso_for_display(s), "available": is_free(s)} for s in slots_utc]
+    return [{"time": _utc_naive_to_taipei_iso_for_display(s), "available": True} for s in slots_utc]
 
 
 @router.post("/book", response_model=PortalBookingResponse)
@@ -258,29 +207,17 @@ async def portal_book(payload: PortalBookingRequest, db: Session = Depends(get_d
         except IntegrityError:
             customer = db.query(Customer).filter(Customer.phone == payload.customer_phone).first()
 
-    lock_key = f"portal-slot:{staff_id}:{start_at.isoformat()}"
-    with _redis.lock(lock_key, timeout=10):
-        if _has_booking_conflict(db, staff_id, start_at, end_at):
-            raise api_error(
-                409,
-                "BOOKING_CONFLICT",
-                "Selected time slot is no longer available",
-                {"staff_id": staff_id, "start_at": start_at.isoformat()},
-            )
-
-        booking = Booking(customer_id=customer.id, status=BookingStatus.confirmed)
-        db.add(booking)
-        db.flush()
-
-        item = BookingItem(
-            booking_id=booking.id,
-            service_id=service.id,
-            staff_id=staff_id,
-            start_at=start_at,
-            end_at=end_at,
-            price=service.price,
-        )
-        db.add(item)
+    booking = Booking(customer_id=customer.id, status=BookingStatus.confirmed)
+    db.add(booking)
+    db.flush()
+    db.add(BookingItem(
+        booking_id=booking.id,
+        service_id=service.id,
+        staff_id=staff_id,
+        start_at=start_at,
+        end_at=end_at,
+        price=service.price,
+    ))
     db.commit()
 
     asyncio.create_task(manager.broadcast("booking_created", {"booking_id": booking.id, "source": "portal"}))
