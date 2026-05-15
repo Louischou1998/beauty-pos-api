@@ -169,22 +169,12 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db), user=D
             if not service:
                 raise api_error(404, "SERVICE_NOT_FOUND", "Service not found", {"service_id": item.service_id})
 
-            end_at = item.start_at + timedelta(minutes=int(service.duration))
-            _validate_booking_time(item, end_at)
-            if not _is_staff_on_shift(db, item.staff_id, item.start_at, end_at):
-                raise api_error(
-                    409,
-                    "STAFF_OFF_SHIFT",
-                    "Staff is off-shift for selected time",
-                    {"staff_id": item.staff_id, "start_at": item.start_at.isoformat()},
-                )
-
             db.add(BookingItem(
                 booking_id=booking.id,
                 service_id=item.service_id,
                 staff_id=item.staff_id,
                 start_at=item.start_at,
-                end_at=end_at,
+                end_at=item.start_at,
                 price=item.price,
             ))
 
