@@ -179,13 +179,14 @@ def create_booking(payload: BookingCreate, db: Session = Depends(get_db), user=D
                     {"staff_id": item.staff_id, "start_at": item.start_at.isoformat()},
                 )
 
-            lock_key = f"slot:{item.staff_id}:{item.start_at.isoformat()}"
-            try:
-                with _redis.lock(lock_key, timeout=10):
-                    _add_booking_item_with_conflict_check(db, booking.id, item, end_at)
-            except RedisError:
-                # Redis unavailable: fallback to DB-level conflict check to avoid 500.
-                _add_booking_item_with_conflict_check(db, booking.id, item, end_at)
+            db.add(BookingItem(
+                booking_id=booking.id,
+                service_id=item.service_id,
+                staff_id=item.staff_id,
+                start_at=item.start_at,
+                end_at=end_at,
+                price=item.price,
+            ))
 
     db.commit()
     db.refresh(booking)
